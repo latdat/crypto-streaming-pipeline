@@ -4,12 +4,29 @@ import os
 import time
 from datetime import timezone
 
+from dotenv import load_dotenv
+load_dotenv()
+
 import psycopg2
 import psycopg2.extras
-from confluent_kafka import Consumer, KafkaError
-from dotenv import load_dotenv
+from confluent_kafka import Consumer, KafkaError, Producer
 
-load_dotenv()
+DLQ_TOPIC = os.getenv("KAFKA_DLQ_TOPIC", "crypto-prices-dlq")
+MAX_RETRY  = int(os.getenv("MAX_RETRY", "3"))
+
+def create_dlq_producer():
+    return Producer({"bootstrap.servers": KAFKA_BOOTSTRAP})
+
+def send_to_dlq(producer, raw_batch, reason):
+    for row in raw_batch:
+        payload = json.dumps({
+            "data": row,
+            "reason": reason,
+            "failed_at": time.time()
+        }).encode()
+        producer.produce(DLQ_TOPIC, value=payload)
+    producer.flush()
+    log.warning("Sent %d rows to DLQ — reason: %s", len(raw_batch), reason)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -18,7 +35,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Cấu hình ────────────────────────────────────────────────
+# Cấu hình
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 TOPIC           = os.getenv("KAFKA_TOPIC", "crypto-prices")
 GROUP_ID        = os.getenv("KAFKA_GROUP_ID", "crypto-consumer-group")
@@ -30,7 +47,7 @@ DB_USER = os.getenv("POSTGRES_USER", "crypto_user")
 DB_PASS = os.getenv("POSTGRES_PASSWORD", "cryptopass235371")
 
 BATCH_SIZE     = int(os.getenv("BATCH_SIZE", "50"))
-FLUSH_INTERVAL = float(os.getenv("FLUSH_INTERVAL", "2.0"))  # seconds
+FLUSH_INTERVAL = float(os.getenv("FLUSH_INTERVAL", "2.0"))  
 
 INSERT_SQL = """
     INSERT INTO crypto_prices
@@ -39,7 +56,7 @@ INSERT_SQL = """
     ON CONFLICT DO NOTHING
 """
 
-# ── DB Connection ─────────────────────────────────────────────
+# DB Connection
 def connect_db():
     while True:
         try:
@@ -54,7 +71,7 @@ def connect_db():
             log.warning("DB not ready: %s — retry in 3s...", e)
             time.sleep(3)
 
-# ── Kafka Consumer ────────────────────────────────────────────
+# Kafka Consumer
 def create_consumer():
     return Consumer({
         "bootstrap.servers":  KAFKA_BOOTSTRAP,
@@ -63,7 +80,7 @@ def create_consumer():
         "enable.auto.commit": False,
     })
 
-# ── Main loop ─────────────────────────────────────────────────
+# Main loop
 def main():
     log.info("Starting consumer...")
     log.info("Kafka: %s | Topic: %s | Group: %s", KAFKA_BOOTSTRAP, TOPIC, GROUP_ID)
@@ -71,6 +88,7 @@ def main():
     log.info("Batch: %d rows | Flush every: %.1fs", BATCH_SIZE, FLUSH_INTERVAL)
 
     conn = connect_db()
+    dlq_producer = create_dlq_producer()
     cur  = conn.cursor()
 
     consumer = create_consumer()
@@ -104,7 +122,6 @@ def main():
                 except (json.JSONDecodeError, KeyError) as e:
                     log.warning("Bad message: %s", e)
 
-            # Flush khi đủ batch hoặc hết timeout
             now = time.monotonic()
             should_flush = (
                 len(batch) >= BATCH_SIZE or
@@ -112,30 +129,37 @@ def main():
             )
 
             if should_flush:
-                try:
-                    psycopg2.extras.execute_values(
-                        cur, INSERT_SQL, batch, page_size=BATCH_SIZE
-                    )
-                    conn.commit()
-                    consumer.commit(asynchronous=False)
-
-                    total_rows += len(batch)
-                    log.info(
-                        "Flushed %3d rows | total=%d | last=%s @ %s",
-                        len(batch),
-                        total_rows,
-                        batch[-1][1],   # symbol
-                        batch[-1][0],   # time
-                    )
+                attempt = 0
+                while attempt < MAX_RETRY:
+                    try:
+                        psycopg2.extras.execute_values(
+                            cur, INSERT_SQL, batch, page_size=BATCH_SIZE
+                        )
+                        conn.commit()
+                        consumer.commit(asynchronous=False)
+                        total_rows += len(batch)
+                        log.info(
+                            "Flushed %3d rows | total=%d | last=%s @ %s",
+                            len(batch), total_rows, batch[-1][1], batch[-1][0],
+                        )
+                        batch.clear()
+                        last_flush = now
+                        break
+                    except psycopg2.Error as e:
+                        attempt += 1
+                        wait = 2 ** attempt          # 2s, 4s, 8s
+                        log.warning("Insert failed (attempt %d/%d): %s — retry in %ds",
+                                    attempt, MAX_RETRY, e, wait)
+                        conn.rollback()
+                        conn = connect_db()
+                        cur  = conn.cursor()
+                        if attempt < MAX_RETRY:
+                            time.sleep(wait)
+                else:
+                    # Hết retry → DLQ
+                    send_to_dlq(dlq_producer, batch, str(e))
                     batch.clear()
                     last_flush = now
-
-                except psycopg2.Error as e:
-                    log.error("DB insert error: %s — reconnecting...", e)
-                    conn.rollback()
-                    conn = connect_db()
-                    cur  = conn.cursor()
-                    batch.clear()
 
     except KeyboardInterrupt:
         log.info("Shutting down...")

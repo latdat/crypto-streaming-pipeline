@@ -17,7 +17,7 @@ logging.basicConfig(
 )
 log = logging.getLogger(__name__)
 
-# ── Cấu hình ────────────────────────────────────────────────
+# Cấu hình 
 KAFKA_BOOTSTRAP = os.getenv("KAFKA_BOOTSTRAP", "kafka:29092")
 TOPIC           = os.getenv("KAFKA_TOPIC", "crypto-prices")
 SYMBOLS         = ["btcusdt", "ethusdt", "bnbusdt", "solusdt"]
@@ -27,7 +27,7 @@ BINANCE_WS = (
     + "/".join(f"{s}@trade" for s in SYMBOLS)
 )
 
-# ── Kafka Producer ───────────────────────────────────────────
+# Kafka Producer 
 producer = Producer({
     "bootstrap.servers": KAFKA_BOOTSTRAP,
     "client.id":         "binance-producer",
@@ -40,7 +40,7 @@ def delivery_report(err, msg):
     if err:
         log.error("Delivery failed | topic=%s err=%s", msg.topic(), err)
 
-# ── Main loop ────────────────────────────────────────────────
+# Main loop
 async def stream():
     log.info("Connecting to Binance WebSocket...")
     log.info("Symbols: %s", SYMBOLS)
@@ -61,8 +61,8 @@ async def stream():
                                           trade["T"] / 1000,
                                           tz=timezone.utc
                                       ).isoformat(),
-                    "symbol":         trade["s"],     # BTCUSDT
-                    "price":          trade["p"],      # string giữ precision
+                    "symbol":         trade["s"],     
+                    "price":          trade["p"],     
                     "quantity":       trade["q"],
                     "trade_id":       trade["t"],
                     "is_buyer_maker": trade["m"],
