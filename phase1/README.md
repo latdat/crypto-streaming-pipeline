@@ -9,37 +9,36 @@
 
 ## 🏗️ Architecture | Kiến trúc
 
-```
-Binance WebSocket (4 symbols)
-         │
-         ▼
-   Producer (Python)
-   confluent-kafka · websockets
-         │
-         ▼
-Apache Kafka 4.1.1 (KRaft mode)
-   topic: crypto-prices (3 partitions)
-         │
-    ┌────┴────┐
-    │  Error  │
-    ▼         ▼
-Consumer    DLQ topic
-(Retry x3)  crypto-prices-dlq
-    │
-    ▼
-TimescaleDB (PostgreSQL 16)
-   Hypertable · OHLCV 5m Continuous Aggregate
-    │
-    ▼
-Power BI (DirectQuery · 30s refresh)
+```text
+[ 🌐 Binance WebSocket ] (BTC, ETH, BNB, SOL)
+           │
+           ▼
+[ 🐍 Python Producer ] (confluent-kafka, websockets)
+           │
+           ▼ (Produce)
+[ 📬 Apache Kafka 4.1.1 ] ◄────────────────────────┐
+           │ (topic: crypto-prices)                │ (Produce back / DLQ)
+           ▼                                       │
+[ ⚙️ Python Consumer ] ──────(Lỗi 3 lần Retry)─────┘
+           │
+           │ (Dữ liệu hợp lệ)
+           ▼
+[ 🛢️ TimescaleDB ] (PostgreSQL 16, Hypertable)
+           │
+           │ (OHLCV 5m Continuous Aggregate)
+           ▼
+[ 📊 Power BI Dashboard ] (DirectQuery, 30s refresh)
 
-── Monitoring ──────────────────────────
-kminion (Kafka)  ──┐
-postgres-exporter ─┼──► Prometheus ──► Grafana ──► Email Alert
-───────────────────┘
-```
 
----
+─────────────────────────────────────────────────────────────────
+ 🛠️ HỆ THỐNG MONITORING & ALERTING
+─────────────────────────────────────────────────────────────────
+ Kafka ───────> [ kminion ] ─────────┐
+                                     ▼
+ TimescaleDB ─> [ pg-exporter ] ──> [ Prometheus ] ──> [ Grafana ] ──> [ 📧 Email Alert ]
+    
+
+```
 
 ## 📦 Services | Các services
 
@@ -54,8 +53,6 @@ postgres-exporter ─┼──► Prometheus ──► Grafana ──► Email A
 | postgres-exporter | prometheuscommunity/postgres-exporter | 9187 | DB metrics exporter |
 | prometheus | prom/prometheus | 9090 | Metrics collection |
 | grafana | grafana/grafana | 3000 | Dashboard & Alerting |
-
----
 
 ## ⚙️ Setup | Cài đặt
 
@@ -197,10 +194,7 @@ phase1/
 ├── db/
 │   └── init.sql            ← Schema + Hypertable + OHLCV view
 ├── monitoring/
-│   └── prometheus.yml      ← Scrape config
-└── docs/
-    ├── Phase1_Documentation.docx
-    └── Phase2_Documentation.docx
+    └── prometheus.yml      ← Scrape config
 ```
 
 ---
